@@ -364,6 +364,64 @@ const PLAYERS = [
 ["Kai Havertz",["Bayer Leverkusen","Chelsea","Arsenal"]],
 ["Timo Werner",["Stuttgart","RB Leipzig","Chelsea","Tottenham"]],
 ["Victor Osimhen",["Wolfsburg","Charleroi","Lille","Napoli","Galatasaray"]],
+["Nicolas Anelka",["PSG","Arsenal","Real Madrid","Liverpool","Manchester City","Fenerbahçe","Bolton Wanderers","Chelsea","Juventus","West Bromwich Albion"]],
+["Karim Adeyemi",["Salzburg","Borussia Dortmund"]],
+["Arda Turan",["Galatasaray","Atletico Madrid","Barcelona","Istanbul Başakşehir"]],
+["Ronaldinho",["Gremio","PSG","Barcelona","AC Milan","Flamengo","Atletico Mineiro"]],
+["Roberto Carlos",["Palmeiras","Inter Milan","Real Madrid","Fenerbahçe","Corinthians"]],
+["Rivaldo",["Corinthians","Palmeiras","Deportivo La Coruña","Barcelona","AC Milan","Olympiacos"]],
+["Gheorghe Hagi",["Steaua Bucuresti","Real Madrid","Brescia","Barcelona","Galatasaray"]],
+["Michael Ballack",["Kaiserslautern","Bayer Leverkusen","Bayern Munich","Chelsea"]],
+["Ronaldo Nazário",["Cruzeiro","PSV","Barcelona","Inter Milan","Real Madrid","AC Milan","Corinthians"]],
+["George Weah",["Monaco","PSG","AC Milan","Chelsea","Manchester City","Marseille"]],
+["Hristo Stoichkov",["CSKA Sofia","Barcelona","Parma","Al Nassr","Chicago Fire","D.C. United"]],
+["Patrick Kluivert",["Ajax","AC Milan","Barcelona","Newcastle","Valencia","PSV","Lille"]],
+["Clarence Seedorf",["Ajax","Sampdoria","Real Madrid","Inter Milan","AC Milan","Botafogo"]],
+["Edgar Davids",["Ajax","AC Milan","Juventus","Barcelona","Inter Milan","Tottenham"]],
+["Michael Owen",["Liverpool","Real Madrid","Newcastle","Manchester United","Stoke City"]],
+["Emmanuel Adebayor",["Monaco","Arsenal","Manchester City","Real Madrid","Tottenham","Istanbul Başakşehir","Olympiacos"]],
+["Samuel Eto'o",["Real Madrid","Mallorca","Barcelona","Inter Milan","Chelsea","Everton","Antalyaspor","Konyaspor"]],
+["Yaya Touré",["Olympiacos","Monaco","Barcelona","Manchester City","Fenerbahçe"]],
+["Kolo Touré",["Arsenal","Manchester City","Liverpool"]],
+["Robinho",["Santos","Real Madrid","Manchester City","AC Milan","Atletico Mineiro","Sivasspor","Istanbul Başakşehir"]],
+["Andriy Shevchenko",["Dynamo Zagreb","AC Milan","Chelsea"]],
+["Deco",["Corinthians","Benfica","Porto","Barcelona","Chelsea"]],
+["Rafael van der Vaart",["Ajax","Hamburger SV","Real Madrid","Tottenham","Real Betis"]],
+["Fernando Torres",["Atletico Madrid","Liverpool","Chelsea","AC Milan"]],
+["Diego Forlán",["Independiente","Manchester United","Villarreal","Atletico Madrid","Inter Milan"]],
+["Hernán Crespo",["River Plate","Parma","Lazio","Inter Milan","Chelsea","AC Milan","Genoa"]],
+["Christian Vieri",["Torino","Atalanta","Juventus","Atletico Madrid","Lazio","Inter Milan","AC Milan","Monaco"]],
+["Alessandro Del Piero",["Juventus","Sydney FC"]],
+["Rui Costa",["Benfica","Fiorentina","AC Milan"]],
+["Luís Figo",["Sporting CP","Barcelona","Real Madrid","Inter Milan"]],
+["Claude Makelele",["Nantes","Marseille","Celta Vigo","Real Madrid","Chelsea","PSG"]],
+["Marco van Basten",["Ajax","AC Milan"]],
+["Ruud Gullit",["Feyenoord","PSV","AC Milan","Sampdoria","Chelsea"]],
+["Dennis Bergkamp",["Ajax","Inter Milan","Arsenal"]],
+["Patrick Vieira",["AC Milan","Arsenal","Juventus","Inter Milan","Manchester City","New York City FC"]],
+["William Gallas",["Marseille","Chelsea","Arsenal","Tottenham"]],
+["Iker Casillas",["Real Madrid","Porto"]],
+["Gianluigi Buffon",["Parma","Juventus","PSG"]],
+["Rüştü Reçber",["Fenerbahçe","Beşiktaş","Barcelona"]],
+["Hakan Şükür",["Galatasaray","Torino","Parma","Inter Milan","Blackburn Rovers"]],
+["Tuncay Şanlı",["Fenerbahçe","Middlesbrough","Stoke City","Wolfsburg","Kayserispor","Bursaspor"]],
+["Nuri Şahin",["Feyenoord","Borussia Dortmund","Real Madrid","Liverpool","Werder Bremen","Antalyaspor"]],
+["Emre Belözoğlu",["Fenerbahçe","Inter Milan","Newcastle","Atletico Madrid"]],
+["Steven N'Zonzi",["Blackburn Rovers","Stoke City","Sevilla","Roma","Rennes","Galatasaray"]],
+["Lukas Podolski",["Köln","Bayern Munich","Arsenal","Inter Milan","Galatasaray","Vissel Kobe","Antalyaspor"]],
+["Mario Gomez",["Stuttgart","Bayern Munich","Fiorentina","Beşiktaş","Wolfsburg"]],
+["Pedri",["Las Palmas","Barcelona"]],
+["Florian Wirtz",["Bayer Leverkusen","Liverpool"]],
+["Alexander Isak",["Borussia Dortmund","Real Sociedad","Newcastle","Liverpool"]],
+["João Neves",["Benfica","PSG"]],
+["João Cancelo",["Benfica","Valencia","Inter Milan","Juventus","Manchester City","Barcelona","Al Hilal"]],
+["Randal Kolo Muani",["Nantes","Eintracht Frankfurt","PSG","Juventus"]],
+["Rasmus Højlund",["Copenhagen","Atalanta","Manchester United","Napoli"]],
+["Endrick",["Palmeiras","Real Madrid"]],
+["Désiré Doué",["Rennes","PSG"]],
+["Michael Olise",["Crystal Palace","Bayern Munich"]],
+["Joshua Kimmich",["Stuttgart","RB Leipzig","Bayern Munich"]],
+["Dani Olmo",["Dinamo Zagreb","RB Leipzig","Barcelona"]],
 ];
 
 const CLUBS = [...new Set(PLAYERS.flatMap(p => p[1]))].sort((a,b)=>a.localeCompare(b,'tr'));
@@ -671,14 +729,42 @@ async function maybeStartBattle(){
   if(ids.length>=2 && d.status==='picking'){
     await db.doc('rooms/'+roomCode).update({
       status:'battle',
-      roundStart: Date.now(),
+      battleStart: Date.now(),
     }).catch(()=>{});
   }
 }
 
+const COUNTDOWN_MS = 3000;
+
 let myWrongGuesses = [];
 
+function renderCountdownPhase(countdownEnd){
+  clearInterval(timerInterval);
+  app.innerHTML = `
+    <div class="card center-msg">
+      <p class="small" style="margin-bottom:6px;">Takımlar birazdan açıklanacak</p>
+      <div class="timer" id="cdNum" style="font-size:88px;">3</div>
+    </div>
+  `;
+  timerInterval = setInterval(()=>{
+    const remain = countdownEnd - Date.now();
+    const el = document.getElementById('cdNum');
+    if(remain<=0){
+      clearInterval(timerInterval);
+      routeRender();
+      return;
+    }
+    const n = Math.ceil(remain/1000);
+    if(el) el.textContent = n;
+  }, 100);
+}
+
 function renderBattle(){
+  const battleStart = roomData.battleStart || roomData.roundStart || Date.now();
+  if(Date.now() < battleStart + COUNTDOWN_MS){
+    renderCountdownPhase(battleStart + COUNTDOWN_MS);
+    return;
+  }
   const players = roomData.players || [];
   const opp = players.find(p=>p.id!==myId);
   const clubs = roomData.clubs || {};
@@ -745,8 +831,10 @@ async function submitGuess(item, clubA, clubB){
 
 function updateTimer(){
   const el = document.getElementById('timerEl');
-  if(!el || !roomData || !roomData.roundStart) return;
-  const remain = Math.max(0, roomData.duration - (Date.now() - roomData.roundStart));
+  const battleStart = roomData && (roomData.battleStart || roomData.roundStart);
+  if(!el || !roomData || !battleStart) return;
+  const guessStart = battleStart + COUNTDOWN_MS;
+  const remain = Math.max(0, roomData.duration - (Date.now() - guessStart));
   const s = Math.ceil(remain/1000);
   el.textContent = s;
   el.classList.toggle('low', s<=15);
@@ -788,7 +876,7 @@ function renderFinished(){
   document.getElementById('againBtn').onclick = async ()=>{
     try{
       await db.doc('rooms/'+roomCode).update({
-        status:'picking', clubs:{}, winner:null, winnerName:null, correctPlayer:null, roundStart:null
+        status:'picking', clubs:{}, winner:null, winnerName:null, correctPlayer:null, roundStart:null, battleStart:null
       });
     }catch(e){}
   };
