@@ -240,7 +240,7 @@
 import { initializeApp } from "https://www.gstatic.com/firebasejs/10.13.0/firebase-app.js";
 import {
   getFirestore, doc, setDoc, getDoc, updateDoc, deleteDoc, onSnapshot,
-  collection, query, where, limit, getDocs
+  collection, query, where, limit, getDocs, arrayUnion
 } from "https://www.gstatic.com/firebasejs/10.13.0/firebase-firestore.js";
 
 const firebaseConfig = {
@@ -257,13 +257,13 @@ const firestore = getFirestore(fbApp);
 
 /* Claude'un db API'sine benzer, ince bir Firestore sarmalayıcı.
    Böylece aşağıdaki oyun kodu değişmeden çalışıyor. */
-function roomRef(code){
-  return doc(firestore, "rooms", code);
+function genericRef(path){
+  const [coll, id] = path.split('/'); // "rooms/CODE" veya "users/Ad"
+  return doc(firestore, coll, id);
 }
 const dbWrapper = {
   doc(path){
-    const [, code] = path.split('/'); // "rooms/CODE"
-    const ref = roomRef(code);
+    const ref = genericRef(path);
     return {
       async get(){
         const snap = await getDoc(ref);
@@ -739,6 +739,8 @@ let roomCode = null;
 let unsub = null;
 let roomData = null;
 let timerInterval = null;
+let accountName = null; // giriş yapılmış rumuz (hesap sistemi)
+let inviteUnsub = null;
 
 function loadLocal(){
   try{
@@ -746,12 +748,101 @@ function loadLocal(){
     if(raw){
       const s = JSON.parse(raw);
       myId = s.myId || null; myName = s.myName || ''; roomCode = s.roomCode || null;
+      accountName = s.accountName || null;
     }
   }catch(e){}
   if(!myId){ myId = 'p_' + Math.random().toString(36).slice(2,10); }
+  if(accountName) myName = accountName;
 }
 function saveLocal(){
-  try{ localStorage.setItem('ortakoyuncu_session', JSON.stringify({myId, myName, roomCode})); }catch(e){}
+  try{ localStorage.setItem('ortakoyuncu_session', JSON.stringify({myId, myName, roomCode, accountName})); }catch(e){}
+}
+
+/* ============ HESAP / ARKADAŞLAR ============ */
+async function accountLoginOrSignup(nickname, password){
+  const clean = nickname.trim();
+  if(!clean || !password) return { ok:false, msg:'Rumuz ve şifre gerekli.' };
+  const ref = db.doc('users/' + clean);
+  try{
+    const snap = await ref.get();
+    if(!snap.exists){
+      await ref.set({ password, friends:[], incoming:[], outgoing:[], invite:null, createdAt: Date.now() });
+    } else {
+      if(snap.data.password !== password){ return { ok:false, msg:'Şifre yanlış.' }; }
+    }
+    accountName = clean; myName = clean; saveLocal();
+    return { ok:true };
+  }catch(e){
+    return { ok:false, msg:'Bağlantı hatası, tekrar dene.' };
+  }
+}
+
+function accountLogout(){
+  if(inviteUnsub){ inviteUnsub(); inviteUnsub = null; }
+  accountName = null; saveLocal();
+}
+
+async function sendFriendRequest(targetName){
+  const target = targetName.trim();
+  if(!target || target === accountName) return { ok:false, msg:'Geçerli bir rumuz gir.' };
+  try{
+    const targetSnap = await db.doc('users/' + target).get();
+    if(!targetSnap.exists) return { ok:false, msg:'Bu rumuzda bir kullanıcı yok.' };
+    const meSnap = await db.doc('users/' + accountName).get();
+    const meData = meSnap.data || {};
+    if((meData.friends||[]).includes(target)) return { ok:false, msg:'Zaten arkadaşsınız.' };
+    const tData = targetSnap.data || {};
+    const outgoing = new Set(meData.outgoing||[]); outgoing.add(target);
+    const incoming = new Set(tData.incoming||[]); incoming.add(accountName);
+    await db.doc('users/' + accountName).update({ outgoing:[...outgoing] });
+    await db.doc('users/' + target).update({ incoming:[...incoming] });
+    return { ok:true };
+  }catch(e){
+    return { ok:false, msg:'İstek gönderilemedi.' };
+  }
+}
+
+async function respondFriendRequest(fromName, accept){
+  try{
+    const meSnap = await db.doc('users/' + accountName).get();
+    const meData = meSnap.data || {};
+    const incoming = (meData.incoming||[]).filter(n=>n!==fromName);
+    const friends = new Set(meData.friends||[]);
+    if(accept) friends.add(fromName);
+    await db.doc('users/' + accountName).update({ incoming, friends:[...friends] });
+    const otherSnap = await db.doc('users/' + fromName).get();
+    if(otherSnap.exists){
+      const oData = otherSnap.data;
+      const outgoing = (oData.outgoing||[]).filter(n=>n!==accountName);
+      const oFriends = new Set(oData.friends||[]);
+      if(accept) oFriends.add(accountName);
+      await db.doc('users/' + fromName).update({ outgoing, friends:[...oFriends] });
+    }
+  }catch(e){}
+}
+
+async function inviteFriendToRoom(friendName){
+  try{
+    await db.doc('users/' + friendName).update({
+      invite: { from: accountName, roomCode, ts: Date.now() }
+    });
+    return true;
+  }catch(e){ return false; }
+}
+
+function listenForInvites(onInvite){
+  if(inviteUnsub) inviteUnsub();
+  if(!accountName) return;
+  inviteUnsub = db.doc('users/' + accountName).onSnapshot(snap=>{
+    if(snap.exists && snap.data.invite && (Date.now() - snap.data.invite.ts) < 5*60*1000){
+      onInvite(snap.data.invite);
+    }
+  });
+}
+
+async function clearMyInvite(){
+  if(!accountName) return;
+  try{ await db.doc('users/' + accountName).update({ invite:null }); }catch(e){}
 }
 
 function genRoomCode(){
@@ -811,10 +902,12 @@ function renderHome(){
   app.innerHTML = `
     <h1 class="brand">ORTAK OYUNCU</h1>
     <p class="brand-sub">İki takım yaz, ortak oynadığı futbolcuyu rakibinden önce bul.</p>
+    <div class="card" id="accountCard"></div>
+    <div id="inviteBanner"></div>
     <div class="card">
       <div class="field">
         <label>Rumuzun</label>
-        <input type="text" id="nameInput" maxlength="16" placeholder="Örn: Efe" value="${myName ? myName.replace(/"/g,'') : ''}">
+        <input type="text" id="nameInput" maxlength="16" placeholder="Örn: Efe" value="${myName ? myName.replace(/"/g,'') : ''}" ${accountName ? 'disabled' : ''}>
       </div>
       <div class="field">
         <label>Şifre (opsiyonel)</label>
@@ -860,7 +953,107 @@ function renderHome(){
   document.getElementById('joinBtn').onclick = ()=>onJoin();
   document.getElementById('refreshRoomsBtn').onclick = loadOpenRooms;
   document.getElementById('nameInput').addEventListener('keydown', e=>{ if(e.key==='Enter') onCreate(); });
-  if(ready) loadOpenRooms();
+  if(ready){
+    loadOpenRooms();
+    renderAccountCard();
+    if(accountName){
+      listenForInvites(invite=>{
+        const el = document.getElementById('inviteBanner');
+        if(!el) return;
+        el.innerHTML = `
+          <div class="card" style="border-color:var(--gold); background:rgba(232,178,58,0.12);">
+            <p class="hint" style="color:var(--line);"><strong>${invite.from}</strong> seni bir maça davet etti!</p>
+            <button class="btn-primary" id="inviteJoinBtn" style="margin-top:8px;">Katıl</button>
+          </div>
+        `;
+        document.getElementById('inviteJoinBtn').onclick = async ()=>{
+          await clearMyInvite();
+          document.getElementById('codeInput').value = invite.roomCode;
+          onJoin();
+        };
+      });
+    }
+  }
+}
+
+function renderAccountCard(){
+  const el = document.getElementById('accountCard');
+  if(!el) return;
+  if(!accountName){
+    el.innerHTML = `
+      <label>Hesap (arkadaş eklemek için)</label>
+      <p class="hint" style="margin-bottom:10px;">Rumuz+şifreni girip giriş yap; rumuz kayıtlı değilse otomatik oluşturulur.</p>
+      <div class="row">
+        <input type="text" id="accNameInput" placeholder="Rumuz" maxlength="16">
+        <input type="password" id="accPwInput" placeholder="Şifre" maxlength="20">
+      </div>
+      <button class="btn-ghost" id="accLoginBtn" style="margin-top:10px;">Giriş Yap / Kayıt Ol</button>
+      <div class="error-msg" id="accError" style="display:none;"></div>
+    `;
+    document.getElementById('accLoginBtn').onclick = async ()=>{
+      const n = document.getElementById('accNameInput').value;
+      const p = document.getElementById('accPwInput').value;
+      const res = await accountLoginOrSignup(n, p);
+      const errEl = document.getElementById('accError');
+      if(!res.ok){ errEl.textContent = res.msg; errEl.style.display='block'; return; }
+      renderHome();
+    };
+  } else {
+    el.innerHTML = `
+      <div style="display:flex; justify-content:space-between; align-items:center;">
+        <p class="hint" style="margin:0;">Giriş yaptın: <strong style="color:var(--gold-bright)">${accountName}</strong></p>
+        <button class="link-btn" id="logoutBtn">Çıkış Yap</button>
+      </div>
+      <div style="margin-top:12px;">
+        <div class="row">
+          <input type="text" id="friendAddInput" placeholder="Arkadaş rumuzu ekle" maxlength="16">
+          <button class="btn-ghost" id="friendAddBtn" style="flex:0 0 auto; width:auto; padding:10px 14px;">Ekle</button>
+        </div>
+        <div class="error-msg" id="friendError" style="display:none;"></div>
+      </div>
+      <div id="friendRequests" style="margin-top:10px;"></div>
+      <div id="friendsList" style="margin-top:10px;"></div>
+    `;
+    document.getElementById('logoutBtn').onclick = ()=>{ accountLogout(); renderHome(); };
+    document.getElementById('friendAddBtn').onclick = async ()=>{
+      const val = document.getElementById('friendAddInput').value;
+      const res = await sendFriendRequest(val);
+      const errEl = document.getElementById('friendError');
+      if(!res.ok){ errEl.textContent = res.msg; errEl.style.display='block'; }
+      else { errEl.style.display='none'; document.getElementById('friendAddInput').value=''; loadFriendsPanel(); }
+    };
+    loadFriendsPanel();
+  }
+}
+
+async function loadFriendsPanel(){
+  const reqEl = document.getElementById('friendRequests');
+  const listEl = document.getElementById('friendsList');
+  if(!reqEl || !listEl) return;
+  try{
+    const snap = await db.doc('users/' + accountName).get();
+    const data = snap.data || {};
+    const incoming = data.incoming || [];
+    const friends = data.friends || [];
+    reqEl.innerHTML = incoming.length ? `<label>Arkadaşlık İstekleri</label>` + incoming.map(n => `
+      <div class="guess-item" style="justify-content:space-between;">
+        <span>${n}</span>
+        <span>
+          <button class="link-btn" data-acc="${n}" data-act="accept">Kabul Et</button>
+          <button class="link-btn" data-acc="${n}" data-act="reject" style="color:var(--red);">Reddet</button>
+        </span>
+      </div>
+    `).join('') : '';
+    listEl.innerHTML = `<label>Arkadaşların (${friends.length})</label>` + (friends.length ? friends.map(n=>`
+      <div class="guess-item"><span>${n}</span></div>
+    `).join('') : `<p class="hint">Henüz arkadaşın yok.</p>`);
+    reqEl.querySelectorAll('[data-act]').forEach(btn=>{
+      btn.onclick = async ()=>{
+        await respondFriendRequest(btn.getAttribute('data-acc'), btn.getAttribute('data-act')==='accept');
+        loadFriendsPanel();
+      };
+    });
+  }catch(e){}
 }
 
 async function loadOpenRooms(){
@@ -965,6 +1158,7 @@ async function onJoin(){
 
 function enterRoom(){
   if(unsub) unsub();
+  if(inviteUnsub){ inviteUnsub(); inviteUnsub = null; }
   app.innerHTML = `<div class="card"><p class="hint">Bağlanıyor…</p></div>`;
   const ref = db.doc('rooms/' + roomCode);
   unsub = ref.onSnapshot(snap=>{
@@ -1039,9 +1233,36 @@ function renderWaiting(){
         </div>
       </div>
     </div>
+    ${(!opp && accountName) ? `<div class="card" id="inviteFriendsCard"><p class="hint">Yükleniyor…</p></div>` : ''}
     <button class="btn-ghost" id="leaveBtn">Odadan Çık</button>
   `;
   document.getElementById('leaveBtn').onclick = leaveRoom;
+  if(!opp && accountName) loadInviteFriendsCard();
+}
+
+async function loadInviteFriendsCard(){
+  const el = document.getElementById('inviteFriendsCard');
+  if(!el) return;
+  try{
+    const snap = await db.doc('users/' + accountName).get();
+    const friends = (snap.data && snap.data.friends) || [];
+    if(!friends.length){ el.innerHTML = `<p class="hint">Davet edecek arkadaşın yok. Ana sayfadan arkadaş ekleyebilirsin.</p>`; return; }
+    el.innerHTML = `<label>Arkadaşını Davet Et</label>` + friends.map(n=>`
+      <div class="guess-item" style="justify-content:space-between;">
+        <span>${n}</span>
+        <button class="link-btn" data-invite="${n}">Davet Et</button>
+      </div>
+    `).join('');
+    el.querySelectorAll('[data-invite]').forEach(btn=>{
+      btn.onclick = async ()=>{
+        btn.textContent = 'Gönderildi ✓';
+        btn.disabled = true;
+        await inviteFriendToRoom(btn.getAttribute('data-invite'));
+      };
+    });
+  }catch(e){
+    el.innerHTML = `<p class="hint">Arkadaş listesi yüklenemedi.</p>`;
+  }
 }
 
 async function leaveRoom(){
