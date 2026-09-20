@@ -108,6 +108,10 @@
   input[type=text]::placeholder{ color: rgba(159,187,166,0.55); }
   .field{ margin-bottom:14px; position:relative; }
   .field:last-child{ margin-bottom:0; }
+  .sel-input{
+    width:100%; background: rgba(244,247,242,0.06); border:1.5px solid rgba(234,244,236,0.25);
+    border-radius:9px; padding:12px 10px; color: var(--line); font-size:14px; font-family:'Work Sans', sans-serif;
+  }
   button{
     font-family:'Work Sans', sans-serif;
     font-weight:700;
@@ -235,7 +239,7 @@
 <script type="module">
 import { initializeApp } from "https://www.gstatic.com/firebasejs/10.13.0/firebase-app.js";
 import {
-  getFirestore, doc, setDoc, getDoc, updateDoc, onSnapshot,
+  getFirestore, doc, setDoc, getDoc, updateDoc, deleteDoc, onSnapshot,
   collection, query, where, limit, getDocs
 } from "https://www.gstatic.com/firebasejs/10.13.0/firebase-firestore.js";
 
@@ -267,6 +271,7 @@ const dbWrapper = {
       },
       async set(obj){ return setDoc(ref, obj); },
       async update(obj){ return updateDoc(ref, obj); },
+      async delete(){ return deleteDoc(ref); },
       onSnapshot(cb, errCb){
         return onSnapshot(ref, snap=>{
           cb({ exists: snap.exists(), data: snap.data() });
@@ -275,17 +280,24 @@ const dbWrapper = {
     };
   },
   async listOpenRooms(){
-    const q = query(collection(firestore, "rooms"), where("status","==","waiting"), limit(30));
+    const STALE_MS = 20 * 60 * 1000; // 20 dakikadan eski odalar listede gösterilmez, silinir
+    const now = Date.now();
+    const q = query(collection(firestore, "rooms"), where("status","==","waiting"), limit(40));
     const snap = await getDocs(q);
     const rooms = [];
     snap.forEach(d=>{
       const data = d.data();
+      const age = now - (data.createdAt||0);
+      if(age > STALE_MS){
+        deleteDoc(d.ref).catch(()=>{}); // arkada temizle
+        return;
+      }
       if((data.players||[]).length===1){
         rooms.push({ code: d.id, hostName: data.players[0]?.name||'?', hasPassword: !!data.password, createdAt: data.createdAt||0 });
       }
     });
     rooms.sort((a,b)=> b.createdAt - a.createdAt);
-    return rooms;
+    return rooms.slice(0,15);
   }
 };
 
@@ -700,6 +712,17 @@ const PLAYERS = [
 
 const CLUBS = [...new Set(PLAYERS.flatMap(p => p[1]))].sort((a,b)=>a.localeCompare(b,'tr'));
 
+const SUPERLIG_CLUBS = new Set([
+  'Galatasaray','Fenerbahçe','Beşiktaş','Trabzonspor','Istanbul Başakşehir',
+  'Kasımpaşa','Kayserispor','Bursaspor','Antalyaspor','Konyaspor','Sivasspor',
+  'Adana Demirspor','Çaykur Rizespor','Alanyaspor','Gaziantep FK','Göztepe',
+  'Samsunspor','Eyüpspor','Karagümrük','Fatih Karagümrük'
+]);
+function clubsForFilter(filter){
+  if(filter === 'superlig') return CLUBS.filter(c => SUPERLIG_CLUBS.has(c));
+  return CLUBS;
+}
+
 function normTr(s){
   return s.toLowerCase()
     .replaceAll('ı','i').replaceAll('İ','i').replaceAll('ş','s').replaceAll('ç','c')
@@ -797,6 +820,24 @@ function renderHome(){
         <label>Şifre (opsiyonel)</label>
         <input type="text" id="pwInput" maxlength="12" placeholder="Boş bırakabilirsin">
       </div>
+      <div class="row" style="margin-bottom:14px;">
+        <div class="field" style="margin-bottom:0;">
+          <label>Tur Süresi</label>
+          <select id="durationSelect" class="sel-input">
+            <option value="60000">60 sn</option>
+            <option value="90000" selected>90 sn</option>
+            <option value="120000">120 sn</option>
+            <option value="180000">180 sn</option>
+          </select>
+        </div>
+        <div class="field" style="margin-bottom:0;">
+          <label>Kulüp Havuzu</label>
+          <select id="leagueSelect" class="sel-input">
+            <option value="all">Tüm Ligler</option>
+            <option value="superlig">Sadece Süper Lig</option>
+          </select>
+        </div>
+      </div>
       <button class="btn-primary" id="createBtn">Oda Kur</button>
       <div class="divider-or">VEYA</div>
       <div class="field" style="margin-bottom:10px;">
@@ -829,12 +870,15 @@ async function loadOpenRooms(){
   try{
     const rooms = await db.listOpenRooms();
     if(!rooms.length){ el.innerHTML = `<p class="hint">Şu an açık oda yok, ilk odayı sen kur.</p>`; return; }
-    el.innerHTML = rooms.map(r => `
+    el.innerHTML = rooms.map(r => {
+      const minsAgo = Math.max(0, Math.floor((Date.now()-r.createdAt)/60000));
+      const agoText = minsAgo < 1 ? 'az önce' : minsAgo + ' dk önce';
+      return `
       <div class="guess-item" style="background:rgba(232,178,58,0.1); border-color:rgba(232,178,58,0.3); justify-content:space-between; cursor:pointer;" data-code="${r.code}">
-        <span>${r.hasPassword?'🔒 ':''}${r.hostName} — <strong style="color:var(--gold-bright)">${r.code}</strong></span>
+        <span>${r.hasPassword?'🔒 ':''}${r.hostName} — <strong style="color:var(--gold-bright)">${r.code}</strong> <span class="sub" style="display:inline; margin-top:0;">· ${agoText}</span></span>
         <span class="link-btn" style="text-decoration:none;">Katıl →</span>
       </div>
-    `).join('');
+    `;}).join('');
     el.querySelectorAll('[data-code]').forEach(row=>{
       row.onclick = ()=>{
         document.getElementById('codeInput').value = row.getAttribute('data-code');
@@ -854,6 +898,8 @@ function showHomeError(msg){
 async function onCreate(){
   const name = document.getElementById('nameInput').value.trim();
   const pw = document.getElementById('pwInput').value.trim();
+  const duration = parseInt(document.getElementById('durationSelect').value, 10) || 90000;
+  const leagueFilter = document.getElementById('leagueSelect').value || 'all';
   if(!name){ showHomeError('Lütfen bir rumuz gir.'); return; }
   if(!ready){ showHomeError('Bağlantı hazırlanıyor, birkaç saniye sonra tekrar dene.'); return; }
   myName = name; saveLocal();
@@ -870,7 +916,8 @@ async function onCreate(){
       correctPlayer:null,
       roundStart:null,
       battleStart:null,
-      duration:90000,
+      duration,
+      leagueFilter,
       score:{},
       skipVotes:{},
       skipped:false,
@@ -1003,13 +1050,17 @@ async function leaveRoom(){
       const snap = await db.doc('rooms/'+roomCode).get();
       if(snap.exists){
         const remaining = (snap.data.players||[]).filter(p=>p.id!==myId);
-        await db.doc('rooms/'+roomCode).update({
-          players: remaining,
-          status: 'waiting',
-          clubs:{}, winner:null, winnerName:null, correctPlayer:null,
-          roundStart:null, battleStart:null, skipVotes:{}, skipped:false,
-          leftNotice: { name: myName, ts: Date.now() }
-        });
+        if(remaining.length===0){
+          await db.doc('rooms/'+roomCode).delete();
+        } else {
+          await db.doc('rooms/'+roomCode).update({
+            players: remaining,
+            status: 'waiting',
+            clubs:{}, winner:null, winnerName:null, correctPlayer:null,
+            roundStart:null, battleStart:null, skipVotes:{}, skipped:false,
+            leftNotice: { name: myName, ts: Date.now() }
+          });
+        }
       }
     }catch(e){}
   }
@@ -1025,9 +1076,11 @@ function renderPicking(){
   const clubs = roomData.clubs || {};
   const myClub = clubs[myId];
   const oppClub = clubs[opp?.id];
+  const leagueFilter = roomData.leagueFilter || 'all';
+  const filteredClubs = clubsForFilter(leagueFilter);
   app.innerHTML = `
     <h1 class="brand" style="font-size:30px;">TAKIMINI SEÇ</h1>
-    <p class="brand-sub">İkiniz de birer takım seçin. İkisi de seçilince maç başlar.</p>
+    <p class="brand-sub">İkiniz de birer takım seçin. İkisi de seçilince maç başlar.${leagueFilter==='superlig' ? ' (Sadece Süper Lig kulüpleri)' : ''}</p>
     <div class="card">
       <div class="players-row" style="margin-bottom:6px;">
         <div class="player-chip">
@@ -1055,7 +1108,7 @@ function renderPicking(){
   if(!myClub){
     const inp = document.getElementById('clubInput');
     const list = document.getElementById('clubList');
-    attachAutocomplete(inp, list, CLUBS, async (club)=>{
+    attachAutocomplete(inp, list, filteredClubs, async (club)=>{
       try{
         await db.doc('rooms/'+roomCode).update({['clubs.'+myId]: club});
         maybeStartBattle();
