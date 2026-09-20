@@ -235,7 +235,8 @@
 <script type="module">
 import { initializeApp } from "https://www.gstatic.com/firebasejs/10.13.0/firebase-app.js";
 import {
-  getFirestore, doc, setDoc, getDoc, updateDoc, onSnapshot
+  getFirestore, doc, setDoc, getDoc, updateDoc, onSnapshot,
+  collection, query, where, limit, getDocs
 } from "https://www.gstatic.com/firebasejs/10.13.0/firebase-firestore.js";
 
 const firebaseConfig = {
@@ -272,6 +273,19 @@ const dbWrapper = {
         }, errCb);
       }
     };
+  },
+  async listOpenRooms(){
+    const q = query(collection(firestore, "rooms"), where("status","==","waiting"), limit(30));
+    const snap = await getDocs(q);
+    const rooms = [];
+    snap.forEach(d=>{
+      const data = d.data();
+      if((data.players||[]).length===1){
+        rooms.push({ code: d.id, hostName: data.players[0]?.name||'?', hasPassword: !!data.password, createdAt: data.createdAt||0 });
+      }
+    });
+    rooms.sort((a,b)=> b.createdAt - a.createdAt);
+    return rooms;
   }
 };
 
@@ -779,6 +793,10 @@ function renderHome(){
         <label>Rumuzun</label>
         <input type="text" id="nameInput" maxlength="16" placeholder="Örn: Efe" value="${myName ? myName.replace(/"/g,'') : ''}">
       </div>
+      <div class="field">
+        <label>Şifre (opsiyonel)</label>
+        <input type="text" id="pwInput" maxlength="12" placeholder="Boş bırakabilirsin">
+      </div>
       <button class="btn-primary" id="createBtn">Oda Kur</button>
       <div class="divider-or">VEYA</div>
       <div class="field" style="margin-bottom:10px;">
@@ -788,11 +806,44 @@ function renderHome(){
       <button class="btn-ghost" id="joinBtn">Odaya Katıl</button>
       <div class="error-msg" id="homeError" style="display:none;"></div>
     </div>
+    <div class="card">
+      <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:10px;">
+        <label style="margin:0;">Açık Odalar</label>
+        <button class="link-btn" id="refreshRoomsBtn">Yenile</button>
+      </div>
+      <div id="openRoomsList"><p class="hint">Yükleniyor…</p></div>
+    </div>
     <p class="footer-note">Bu sayfayı rakibine gönder, oda kodunu paylaş. Oynamak için ikinizin de bu sayfayı açık tutması yeterli.</p>
   `;
   document.getElementById('createBtn').onclick = onCreate;
-  document.getElementById('joinBtn').onclick = onJoin;
+  document.getElementById('joinBtn').onclick = ()=>onJoin();
+  document.getElementById('refreshRoomsBtn').onclick = loadOpenRooms;
   document.getElementById('nameInput').addEventListener('keydown', e=>{ if(e.key==='Enter') onCreate(); });
+  if(ready) loadOpenRooms();
+}
+
+async function loadOpenRooms(){
+  const el = document.getElementById('openRoomsList');
+  if(!el) return;
+  el.innerHTML = `<p class="hint">Yükleniyor…</p>`;
+  try{
+    const rooms = await db.listOpenRooms();
+    if(!rooms.length){ el.innerHTML = `<p class="hint">Şu an açık oda yok, ilk odayı sen kur.</p>`; return; }
+    el.innerHTML = rooms.map(r => `
+      <div class="guess-item" style="background:rgba(232,178,58,0.1); border-color:rgba(232,178,58,0.3); justify-content:space-between; cursor:pointer;" data-code="${r.code}">
+        <span>${r.hasPassword?'🔒 ':''}${r.hostName} — <strong style="color:var(--gold-bright)">${r.code}</strong></span>
+        <span class="link-btn" style="text-decoration:none;">Katıl →</span>
+      </div>
+    `).join('');
+    el.querySelectorAll('[data-code]').forEach(row=>{
+      row.onclick = ()=>{
+        document.getElementById('codeInput').value = row.getAttribute('data-code');
+        onJoin();
+      };
+    });
+  }catch(e){
+    el.innerHTML = `<p class="hint">Oda listesi yüklenemedi.</p>`;
+  }
 }
 
 function showHomeError(msg){
@@ -802,6 +853,7 @@ function showHomeError(msg){
 
 async function onCreate(){
   const name = document.getElementById('nameInput').value.trim();
+  const pw = document.getElementById('pwInput').value.trim();
   if(!name){ showHomeError('Lütfen bir rumuz gir.'); return; }
   if(!ready){ showHomeError('Bağlantı hazırlanıyor, birkaç saniye sonra tekrar dene.'); return; }
   myName = name; saveLocal();
@@ -822,6 +874,8 @@ async function onCreate(){
       score:{},
       skipVotes:{},
       skipped:false,
+      password: pw || null,
+      leftNotice: null,
       createdAt: Date.now()
     });
     roomCode = code; saveLocal();
@@ -847,8 +901,13 @@ async function onJoin(){
     const already = players.find(p=>p.id===myId);
     if(!already){
       if(players.length>=2){ showHomeError('Bu oda dolu.'); return; }
+      if(data.password){
+        const entered = prompt('Bu oda şifreli. Şifreyi gir:');
+        if(entered === null){ return; }
+        if(entered.trim() !== data.password){ showHomeError('Şifre yanlış.'); return; }
+      }
       players = [...players, {id:myId,name:myName}];
-      await ref.update({players});
+      await ref.update({players, leftNotice:null});
     }
     roomCode = code; saveLocal();
     enterRoom();
@@ -911,8 +970,11 @@ function renderWaiting(){
   const players = roomData.players || [];
   const me = players.find(p=>p.id===myId);
   const opp = players.find(p=>p.id!==myId);
+  const notice = roomData.leftNotice;
+  const showNotice = notice && (Date.now() - notice.ts) < 20000;
   app.innerHTML = `
     <h1 class="brand" style="font-size:30px;">ODA: ${roomCode}</h1>
+    ${showNotice ? `<div class="card" style="border-color:var(--red); background:rgba(214,90,74,0.12);"><p class="hint" style="color:var(--line);"><strong>${notice.name}</strong> odadan ayrıldı.</p></div>` : ''}
     <div class="card">
       <div class="code-badge">${roomCode}</div>
       <p class="hint">Bu kodu rakibine gönder</p>
@@ -935,7 +997,22 @@ function renderWaiting(){
   document.getElementById('leaveBtn').onclick = leaveRoom;
 }
 
-function leaveRoom(){
+async function leaveRoom(){
+  if(roomCode && db){
+    try{
+      const snap = await db.doc('rooms/'+roomCode).get();
+      if(snap.exists){
+        const remaining = (snap.data.players||[]).filter(p=>p.id!==myId);
+        await db.doc('rooms/'+roomCode).update({
+          players: remaining,
+          status: 'waiting',
+          clubs:{}, winner:null, winnerName:null, correctPlayer:null,
+          roundStart:null, battleStart:null, skipVotes:{}, skipped:false,
+          leftNotice: { name: myName, ts: Date.now() }
+        });
+      }
+    }catch(e){}
+  }
   if(unsub) unsub();
   unsub = null;
   roomCode = null; saveLocal();
