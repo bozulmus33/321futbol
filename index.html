@@ -415,7 +415,11 @@ async function onCreate(){
       winnerName:null,
       correctPlayer:null,
       roundStart:null,
+      battleStart:null,
       duration:90000,
+      score:{},
+      skipVotes:{},
+      skipped:false,
       createdAt: Date.now()
     });
     roomCode = code; saveLocal();
@@ -633,9 +637,16 @@ function renderBattle(){
   const clubs = roomData.clubs || {};
   const clubNames = Object.values(clubs);
   const [clubA, clubB] = clubNames;
+  const score = roomData.score || {};
+  const myScore = score[myId] || 0;
+  const oppScore = (opp && score[opp.id]) || 0;
+  const skipVotes = roomData.skipVotes || {};
+  const iSkipped = !!skipVotes[myId];
+  const oppSkipped = !!(opp && skipVotes[opp.id]);
 
   app.innerHTML = `
     <h1 class="brand" style="font-size:28px; text-align:center;">ORTAK FUTBOLCUYU BUL</h1>
+    <p class="hint" style="margin-bottom:6px;">Skor: Sen <strong style="color:var(--gold-bright)">${myScore}</strong> — <strong style="color:var(--gold-bright)">${oppScore}</strong> ${opp?.name||''} <span style="opacity:.7">(3 tur kazanan maçı alır)</span></p>
     <div class="timer" id="timerEl">--</div>
     <div class="club-vs">
       <div class="club-box"><div class="lbl">TAKIM 1</div><div class="name">${clubA||'?'}</div></div>
@@ -649,7 +660,9 @@ function renderBattle(){
         <div class="autocomplete-list" id="guessList" style="display:none;"></div>
       </div>
       <p class="hint">Rakibin: ${opp?.name||''} — o da tahmin ediyor</p>
+      ${oppSkipped ? `<p class="hint" style="color:var(--gold-bright)">${opp.name} turu geçmek istiyor</p>` : ''}
       <div class="guess-list" id="wrongList"></div>
+      <button class="btn-ghost" id="skipBtn" ${iSkipped?'disabled':''} style="margin-top:8px;">${iSkipped ? 'Geçmeyi bekliyorsun…' : 'Turu Geç (ikiniz de geçerse tur atlanır)'}</button>
     </div>
   `;
   const inp = document.getElementById('guessInput');
@@ -659,10 +672,28 @@ function renderBattle(){
     inp.value='';
   }, (item)=> item[2] || item[1][item[1].length-1]);
 
+  document.getElementById('skipBtn').onclick = voteSkip;
+
   renderWrongList();
   clearInterval(timerInterval);
   timerInterval = setInterval(updateTimer, 250);
   updateTimer();
+}
+
+async function voteSkip(){
+  try{
+    await db.doc('rooms/'+roomCode).update({['skipVotes.'+myId]: true});
+    const snap = await db.doc('rooms/'+roomCode).get();
+    if(snap.exists && snap.data.status==='battle'){
+      const sv = snap.data.skipVotes||{};
+      const pids = (snap.data.players||[]).map(p=>p.id);
+      if(pids.length>=2 && pids.every(id=>sv[id])){
+        await db.doc('rooms/'+roomCode).update({
+          status:'finished', winner:null, winnerName:null, correctPlayer:null, skipped:true
+        });
+      }
+    }
+  }catch(e){}
 }
 
 function renderWrongList(){
@@ -679,8 +710,10 @@ async function submitGuess(item, clubA, clubB){
     try{
       const snap = await db.doc('rooms/'+roomCode).get();
       if(snap.exists && snap.data.status==='battle' && !snap.data.winner){
+        const curScore = (snap.data.score && snap.data.score[myId]) || 0;
         await db.doc('rooms/'+roomCode).update({
-          status:'finished', winner: myId, winnerName: myName, correctPlayer: name
+          status:'finished', winner: myId, winnerName: myName, correctPlayer: name,
+          ['score.'+myId]: curScore + 1
         });
       }
     }catch(e){}
@@ -718,31 +751,66 @@ async function handleTimeUp(){
 
 function renderFinished(){
   myWrongGuesses = [];
+  const players = roomData.players || [];
+  const opp = players.find(p=>p.id!==myId);
+  const score = roomData.score || {};
+  const myScore = score[myId] || 0;
+  const oppScore = (opp && score[opp.id]) || 0;
   const iWon = roomData.winner === myId;
-  const noWinner = !roomData.winner;
+  const wasSkipped = !!roomData.skipped;
+  const noWinner = !roomData.winner && !wasSkipped;
   const correctPlayerName = roomData.correctPlayer;
   const correctPlayerData = PLAYERS.find(p=>p[0]===correctPlayerName);
+  const matchWinnerId = myScore>=3 ? myId : (oppScore>=3 ? opp?.id : null);
+  const matchOver = !!matchWinnerId;
+  const iWonMatch = matchWinnerId === myId;
+
   app.innerHTML = `
     <div class="card center-msg">
-      ${noWinner ? `
+      ${wasSkipped ? `
+        <div class="big">Tur Geçildi ⏭</div>
+        <p class="small">İkiniz de geçmeyi seçtiniz.</p>
+      ` : noWinner ? `
         <div class="big">Süre doldu ⏱</div>
         <p class="small">Kimse doğru cevabı bulamadı.</p>
       ` : `
-        <div class="big">${iWon ? 'Kazandın! 🏆' : (roomData.winnerName + ' kazandı')}</div>
+        <div class="big">${iWon ? 'Bu turu kazandın! 🏆' : (roomData.winnerName + ' bu turu kazandı')}</div>
         <p class="small">Doğru cevap: <strong style="color:var(--gold-bright)">${correctPlayerName}</strong></p>
         ${correctPlayerData ? `<p class="winner-clubs">${correctPlayerData[1].join(' → ')}</p>` : ''}
       `}
+      <p class="hint" style="margin-top:16px; font-size:15px;">Genel Skor: Sen <strong style="color:var(--gold-bright)">${myScore}</strong> — <strong style="color:var(--gold-bright)">${oppScore}</strong> ${opp?.name||''}</p>
     </div>
-    <button class="btn-primary" id="againBtn">Yeni Tur</button>
+    ${matchOver ? `
+      <div class="card center-msg">
+        <div class="big" style="font-size:40px;">${iWonMatch ? 'MAÇI KAZANDIN! 🏆🏆🏆' : (opp?.name + ' MAÇI KAZANDI')}</div>
+        <p class="small">3 tur kazanan maçı aldı.</p>
+      </div>
+      <button class="btn-primary" id="rematchBtn">Yeni Maç (0-0)</button>
+    ` : `
+      <button class="btn-primary" id="againBtn">Sıradaki Tur</button>
+    `}
     <button class="btn-ghost" id="leaveBtn2" style="margin-top:10px;">Odadan Çık</button>
   `;
-  document.getElementById('againBtn').onclick = async ()=>{
+  const nextRound = async ()=>{
     try{
       await db.doc('rooms/'+roomCode).update({
-        status:'picking', clubs:{}, winner:null, winnerName:null, correctPlayer:null, roundStart:null, battleStart:null
+        status:'picking', clubs:{}, winner:null, winnerName:null, correctPlayer:null,
+        roundStart:null, battleStart:null, skipVotes:{}, skipped:false
       });
     }catch(e){}
   };
+  if(matchOver){
+    document.getElementById('rematchBtn').onclick = async ()=>{
+      try{
+        await db.doc('rooms/'+roomCode).update({
+          status:'picking', clubs:{}, winner:null, winnerName:null, correctPlayer:null,
+          roundStart:null, battleStart:null, skipVotes:{}, skipped:false, score:{}
+        });
+      }catch(e){}
+    };
+  } else {
+    document.getElementById('againBtn').onclick = nextRound;
+  }
   document.getElementById('leaveBtn2').onclick = leaveRoom;
 }
 
